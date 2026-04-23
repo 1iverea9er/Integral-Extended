@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 import logging
 from typing import TYPE_CHECKING, Any, Final, Self
+from collections import deque
 
 import voluptuous as vol
 
@@ -63,6 +64,7 @@ from .const import (
     METHOD_LEFT,
     METHOD_RIGHT,
     METHOD_TRAPEZOIDAL,
+    CONF_TIME_WINDOW,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,6 +105,7 @@ PLATFORM_SCHEMA = vol.All(
             vol.Optional(CONF_METHOD, default=METHOD_TRAPEZOIDAL): vol.In(
                 INTEGRATION_METHODS
             ),
+            vol.Optional(CONF_TIME_WINDOW): cv.time_period,
         }
     ),
 )
@@ -253,6 +256,8 @@ async def async_setup_entry(
         max_sub_interval = cv.time_period(max_sub_interval_dict)
     else:
         max_sub_interval = None
+        
+    time_window=config_entry.options.get(CONF_TIME_WINDOW),
 
     round_digits = config_entry.options.get(CONF_ROUND_DIGITS)
     if round_digits:
@@ -290,6 +295,7 @@ async def async_setup_platform(
         unit_prefix=config.get(CONF_UNIT_PREFIX),
         unit_time=config[CONF_UNIT_TIME],
         max_sub_interval=config.get(CONF_MAX_SUB_INTERVAL),
+        time_window=config.get(CONF_TIME_WINDOW),
     )
 
     async_add_entities([integral])
@@ -313,6 +319,7 @@ class IntegrationSensor(RestoreSensor):
         unit_prefix: str | None,
         unit_time: UnitOfTime,
         max_sub_interval: timedelta | None,
+        time_window: timedelta | None,
     ) -> None:
         """Initialize the integration sensor."""
         self._attr_unique_id = unique_id
@@ -343,6 +350,8 @@ class IntegrationSensor(RestoreSensor):
         self._last_integration_time: datetime = datetime.now(tz=UTC)
         self._last_integration_trigger = _IntegrationTrigger.StateEvent
         self._attr_suggested_display_precision = round_digits or 2
+        self._time_window = time_window
+        self._samples: deque[tuple[datetime, Decimal]] = deque()
 
     def _calculate_unit(self, source_unit: str) -> str:
         """Multiply source_unit with time unit of the integral.
@@ -405,6 +414,35 @@ class IntegrationSensor(RestoreSensor):
         _LOGGER.debug(
             "area = %s, area_scaled = %s new state = %s", area, area_scaled, self._state
         )
+        self._last_valid_state = self._state
+        
+    def _cleanup_window(self, now: datetime) -> None:
+        if self._time_window is None:
+            return
+    
+        cutoff = now - self._time_window
+    
+        while self._samples and self._samples[0][0] < cutoff:
+            self._samples.popleft()
+            
+    def _recalculate_window_integral(self) -> None:
+        if len(self._samples) < 2:
+            return
+    
+        total = Decimal("0")
+        samples = list(self._samples)
+    
+        for i in range(1, len(samples)):
+            t0, v0 = samples[i - 1]
+            t1, v1 = samples[i]
+    
+            dt = Decimal((t1 - t0).total_seconds())
+    
+            total += dt * (v0 + v1) / 2
+    
+        total = total / (self._unit_prefix * self._unit_time)
+    
+        self._state = total
         self._last_valid_state = self._state
 
     async def async_added_to_hass(self) -> None:
@@ -533,45 +571,62 @@ class IntegrationSensor(RestoreSensor):
     ) -> None:
         if new_state is None:
             return
-
+    
         if new_state.state == STATE_UNAVAILABLE:
             self._attr_available = False
             self.async_write_ha_state()
             return
-
+    
         if old_state:
-            # state has changed, we recover old_state from the event
             new_timestamp = new_state.last_updated
             old_state_state = old_state.state
             old_timestamp = old_state.last_reported
         else:
-            # first state or event state reported without any state change
             old_state_state = new_state.state
-
+    
         self._attr_available = True
         self._derive_and_set_attributes_from_state(new_state)
-
+    
         if old_timestamp is None and old_state is None:
             self.async_write_ha_state()
             return
-
+    
         if not (
             states := self._method.validate_states(old_state_state, new_state.state)
         ):
             self.async_write_ha_state()
             return
-
+    
         if TYPE_CHECKING:
             assert new_timestamp is not None
+    
+        now = new_timestamp
+    
+        # if time_window defined — new method
+        if self._time_window is not None:
+            value = states[1]
+    
+            self._samples.append((now, value))
+            self._cleanup_window(now)
+            self._recalculate_window_integral()
+    
+            self.async_write_ha_state()
+            return
+    
+        #  (fallback)
+        if TYPE_CHECKING:
             assert old_timestamp is not None
+    
         elapsed_seconds = Decimal(
             (new_timestamp - old_timestamp).total_seconds()
             if self._last_integration_trigger == _IntegrationTrigger.StateEvent
             else (new_timestamp - self._last_integration_time).total_seconds()
         )
-
-        area = self._method.calculate_area_with_two_states(elapsed_seconds, *states)
-
+    
+        area = self._method.calculate_area_with_two_states(
+            elapsed_seconds, *states
+        )
+    
         self._update_integral(area)
         self.async_write_ha_state()
 
