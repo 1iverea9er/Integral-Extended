@@ -1,0 +1,11 @@
+{
+  "domain": "integration_ex",
+  "name": "Integral Extended",
+  "version": "1.0.1",
+  "codeowners": ["@dgomes"],
+  "dependencies": [],
+  "documentation": "https://github.com/1iverea9er/Integral-Extended",
+  "requirements": [],
+  "iot_class": "local_push",
+  "quality_scale": "internal"
+}
