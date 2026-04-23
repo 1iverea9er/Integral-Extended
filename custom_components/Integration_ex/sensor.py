@@ -173,7 +173,7 @@ class _Right(_IntegrationMethod):
 def _decimal_state(state: str) -> Decimal | None:
     try:
         return Decimal(state)
-    except InvalidOperation, TypeError:
+    except (InvalidOperation, TypeError, ValueError):
         return None
 
 
@@ -193,46 +193,56 @@ class _IntegrationTrigger(Enum):
 class IntegrationSensorExtraStoredData(SensorExtraStoredData):
     """Object to hold extra stored data."""
 
-    source_entity: str | None
-    last_valid_state: Decimal | None
+    source_entity: str | None = None
+    last_valid_state: Decimal | None = None
+    samples: list[tuple[str, str]] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        """Return a dict representation of the utility sensor data."""
+        """Return dict representation."""
         data = super().as_dict()
         data["source_entity"] = self.source_entity
         data["last_valid_state"] = (
-            str(self.last_valid_state) if self.last_valid_state else None
+            str(self.last_valid_state) if self.last_valid_state is not None else None
         )
+        data["samples"] = self.samples or []
         return data
 
     @classmethod
     def from_dict(cls, restored: dict[str, Any]) -> Self | None:
-        """Initialize a stored sensor state from a dict."""
+        """Restore from dict (robust version)."""
         extra = SensorExtraStoredData.from_dict(restored)
         if extra is None:
             return None
 
         source_entity = restored.get(ATTR_SOURCE_ID)
 
+        raw_last = restored.get("last_valid_state")
         try:
-            last_valid_state = (
-                Decimal(str(restored.get("last_valid_state")))
-                if restored.get("last_valid_state")
-                else None
-            )
-        except InvalidOperation:
-            # last_period is corrupted
-            _LOGGER.error("Could not use last_valid_state")
+            last_valid_state = Decimal(str(raw_last)) if raw_last is not None else None
+        except (InvalidOperation, TypeError, ValueError):
+            _LOGGER.error("Could not restore last_valid_state")
             return None
 
-        if last_valid_state is None:
-            return None
+        raw_samples = restored.get("samples") or []
+
+        # validate samples safely
+        samples: list[tuple[str, str]] = []
+        if isinstance(raw_samples, list):
+            for item in raw_samples:
+                if (
+                    isinstance(item, (list, tuple))
+                    and len(item) == 2
+                    and isinstance(item[0], str)
+                    and isinstance(item[1], str)
+                ):
+                    samples.append((item[0], item[1]))
 
         return cls(
             extra.native_value,
             extra.native_unit_of_measurement,
             source_entity,
             last_valid_state,
+            samples if samples else None,
         )
 
 
@@ -257,8 +267,6 @@ async def async_setup_entry(
     else:
         max_sub_interval = None
         
-    time_window=config_entry.options.get(CONF_TIME_WINDOW),
-
     round_digits = config_entry.options.get(CONF_ROUND_DIGITS)
     if round_digits:
         round_digits = int(round_digits)
@@ -273,6 +281,7 @@ async def async_setup_entry(
         unit_prefix=unit_prefix,
         unit_time=config_entry.options[CONF_UNIT_TIME],
         max_sub_interval=max_sub_interval,
+        time_window=config_entry.options.get(CONF_TIME_WINDOW)
     )
 
     async_add_entities([integral])
@@ -465,6 +474,19 @@ class IntegrationSensor(RestoreSensor):
                 self._last_valid_state,
             )
 
+        if last_sensor_data and getattr(last_sensor_data, "samples", None):
+            try:
+                self._samples = deque(
+                    [
+                        (datetime.fromisoformat(ts), Decimal(val))
+                        for ts, val in last_sensor_data.samples
+                    ]
+                )
+                self._cleanup_window(datetime.now(tz=UTC))
+            except Exception as e:
+                _LOGGER.warning("Failed to restore samples: %s", e)
+                self._samples = deque()
+
         if self._max_sub_interval is not None:
             source_state = self.hass.states.get(self._sensor_source_id)
             self._schedule_max_sub_interval_exceeded_if_state_is_numeric(source_state)
@@ -494,6 +516,7 @@ class IntegrationSensor(RestoreSensor):
                 handle_state_report,
             )
         )
+
 
     @callback
     def _integrate_on_state_change_with_max_sub_interval(
@@ -703,6 +726,10 @@ class IntegrationSensor(RestoreSensor):
             self.native_unit_of_measurement,
             self._source_entity,
             self._last_valid_state,
+            samples=[
+                (ts.isoformat(), str(val))
+                for ts, val in self._samples
+            ],
         )
 
     async def async_get_last_sensor_data(
