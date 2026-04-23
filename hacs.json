@@ -1,0 +1,7 @@
+{
+  "name": "Integral Extended",
+  "content_in_root": false,
+  "domains": ["integral_ex"],
+  "homeassistant": "2024.6.0",
+  "render_readme": true
+}
