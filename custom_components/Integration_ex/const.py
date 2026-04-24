@@ -1,6 +1,6 @@
 """Constants for the Integration - Riemann sum integral integration."""
 
-DOMAIN = "integration"
+DOMAIN = "integration_ex"
 
 CONF_ROUND_DIGITS = "round"
 CONF_SOURCE_SENSOR = "source"
