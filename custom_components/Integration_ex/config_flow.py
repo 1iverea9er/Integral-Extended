@@ -29,6 +29,7 @@ from .const import (
     CONF_MAX_SUB_INTERVAL,
     CONF_ROUND_DIGITS,
     CONF_SOURCE_SENSOR,
+    CONF_TIME_WINDOW,
     CONF_UNIT_PREFIX,
     CONF_UNIT_TIME,
     DOMAIN,
@@ -102,6 +103,9 @@ async def _get_options_dict(handler: SchemaCommonFlowHandler | None) -> dict:
             ),
         ),
         vol.Optional(CONF_MAX_SUB_INTERVAL): selector.DurationSelector(
+            selector.DurationSelectorConfig(allow_negative=False)
+        ),
+        vol.Optional(CONF_TIME_WINDOW): selector.DurationSelector(
             selector.DurationSelectorConfig(allow_negative=False)
         ),
     }
